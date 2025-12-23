@@ -10,15 +10,26 @@ const EHR_ABI = require('./EHR_ABI.json');
 require('dotenv').config();
 
 const app = express();
+
+// --- SECURE CORS CONFIGURATION ---
+// This allows your specific Vercel frontend to talk to this backend
+const corsOptions = {
+    origin: 'https://healthchain-frontend.vercel.app',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+    optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+app.use(express.json());
+
 const pinata = new pinataSDK(process.env.PINATA_API_KEY, process.env.PINATA_SECRET_API_KEY);
 
 // --- Ethers Setup ---
 const provider = new ethers.JsonRpcProvider(process.env.ALCHEMY_RPC_URL); 
 const wallet = new ethers.Wallet(process.env.BACKEND_PRIVATE_KEY, provider);
 const ehrContract = new ethers.Contract(process.env.EHR_CONTRACT_ADDRESS, EHR_ABI.abi, wallet);
-
-app.use(cors());
-app.use(express.json());
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
@@ -29,7 +40,6 @@ mongoose.connect(process.env.MONGO_URI)
 
 /**
  * Robust Gas Strategy for Production
- * Bypasses "txpool is full" and "BAD_DATA" errors.
  */
 async function getGasOverrides() {
     try {
@@ -67,7 +77,7 @@ async function getNextId(sequenceName, prefix, start) {
 }
 
 // --- Routes ---
-app.get('/', (req, res) => res.send('EHR Backend Active.'));
+app.get('/', (req, res) => res.send('EHR Backend Active and Healthy.'));
 
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     const { patientId, uploaderId, fileType } = req.body;
@@ -111,7 +121,6 @@ app.post('/api/access/revoke-doctor', async (req, res) => {
     } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
-// (Analogous logic for Diagnostic grant/revoke follows...)
 app.post('/api/access/grant-diagnostic', async (req, res) => {
     try {
         const overrides = await getGasOverrides();
@@ -123,8 +132,11 @@ app.post('/api/access/grant-diagnostic', async (req, res) => {
 
 app.post('/api/access/revoke-diagnostic', async (req, res) => {
     try {
+        const pId = req.body.patientId.trim();
+        const dgId = req.body.diagnosticId.trim();
+        try { await ehrContract.revokeDiagnosticAccess.staticCall(pId, dgId); } catch (sim) { return res.status(400).json({ message: "Not authorized." }); }
         const overrides = await getGasOverrides();
-        const tx = await ehrContract.revokeDiagnosticAccess(req.body.patientId.trim(), req.body.diagnosticId.trim(), overrides);
+        const tx = await ehrContract.revokeDiagnosticAccess(pId, dgId, overrides);
         await tx.wait();
         res.status(200).json({ message: 'Success' });
     } catch (e) { res.status(500).json({ message: e.message }); }
@@ -134,7 +146,7 @@ app.get('/api/records/:patientId', async (req, res) => {
     try {
         const records = await ehrContract.getRecords(req.params.patientId.trim());
         res.status(200).json(records.map(r => ({ cid: r.cid, uploaderId: r.uploaderId, fileType: r.fileType, timestamp: new Date(Number(r.timestamp) * 1000).toLocaleString() })));
-    } catch (error) { res.status(500).json({ message: 'Error.' }); }
+    } catch (error) { res.status(500).json({ message: 'Error fetching records.' }); }
 });
 
 app.post('/api/doctor/records', async (req, res) => {
@@ -172,5 +184,5 @@ app.post('/api/register/:role', async (req, res) => {
     res.json({ [idField]: id });
 });
 
-const PORT = process.env.PORT || 8000;
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Production Server on Port ${PORT}`));
